@@ -1,0 +1,140 @@
+import cv2
+import numpy as np
+import os
+import glob
+import shutil
+import matplotlib.pyplot as plt
+
+def detect_gray_mutation_sliding_window(folder_path, 
+                                        window_size=35,        # X轴滑动窗口大小
+                                        roi_position='bottom', # 'top' 或 'bottom'
+                                        roi_ratio=0.15,        # 截取 15%
+                                        mutation_threshold=5.0, # 阈值 (滑动平均后数值波动较小，建议调低)
+                                        debug_mode=False):
+    
+    # 1. 准备路径
+    bmp_files = glob.glob(os.path.join(folder_path, "*.bmp"))
+    if not bmp_files:
+        print("未找到BMP图片")
+        return
+
+    # 输出文件夹命名带上窗口大小，方便区分
+    output_folder = os.path.join(folder_path, f"Mutation_Detected_Win{window_size}")
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    print(f"开始处理 {len(bmp_files)} 张图片...")
+    print(f"截取位置: {roi_position.upper()} {roi_ratio*100}% | 滑动窗口: {window_size}px")
+    print(f"突变判定阈值: {mutation_threshold}") 
+
+    detect_count = 0
+
+    for file_path in bmp_files:
+        filename = os.path.basename(file_path)
+        img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
+        if img is None: continue
+
+        h, w = img.shape
+        # 保护：如果图片比窗口还窄，无法滑动
+        if h <= 6 or w <= window_size + 6:
+            continue
+            
+        # --- A. 裁剪四周 3 像素 ---
+        img_cropped = img[3:h-3, 3:w-3]
+        h_c, w_c = img_cropped.shape
+
+        # --- B. 截取 ROI (Top 或 Bottom) ---
+        roi_height = int(h_c * roi_ratio)
+        if roi_height < 1: roi_height = 1 # 防止除以0
+
+        if roi_position == 'top':
+            roi = img_cropped[0:roi_height, :]
+        else:
+            start_y = h_c - roi_height
+            roi = img_cropped[start_y:, :]
+
+        # --- C. 核心统计计算 ---
+        
+        # 1. 先计算每一列的【垂直平均灰度】(得到 1D 原始曲线)
+        raw_col_means = np.mean(roi, axis=0) 
+        
+        # 2. X轴滑动窗口平滑 (卷积运算)
+        # 创建一个 1/35 的归一化卷积核
+        kernel = np.ones(window_size) / window_size
+        
+        # mode='valid': 只计算窗口完全覆盖的区域，边缘会被裁掉 (输出长度 = w_c - window_size + 1)
+        smoothed_curve = np.convolve(raw_col_means, kernel, mode='valid')
+        
+        # --- D. 突变检测 ---
+        # 计算平滑后的曲线的梯度 (相邻窗口均值的差)
+        diffs = np.abs(np.diff(smoothed_curve))
+        
+        max_diff = 0
+        if len(diffs) > 0:
+            max_diff = np.max(diffs)
+            
+        # --- E. 判定与保存 ---
+        # 注意：经过平均后，数值变化会变缓，阈值通常比原始像素差要设得低一点
+        if max_diff > mutation_threshold:
+            print(f"[异常] {filename} -> 滑动均值跳变: {max_diff:.2f}")
+            shutil.copy(file_path, os.path.join(output_folder, filename))
+            detect_count += 1
+            
+            # --- F. 调试绘图 ---
+            if debug_mode:
+                plt.figure(figsize=(10, 5))
+                
+                # 画原始列均值 (浅色)
+                plt.plot(raw_col_means, color='lightgray', label='Raw Column Mean', linewidth=1)
+                
+                # 画滑动窗口后的均值 (深色，X轴需要偏移以便对齐)
+                # 因为 'valid' 模式下，结果从第 (window/2) 个像素开始有效
+                x_axis = np.arange(len(smoothed_curve)) + (window_size // 2)
+                plt.plot(x_axis, smoothed_curve, color='blue', label=f'Sliding Window ({window_size}px) Mean')
+                
+                # 画差分值 (红色)
+                # 放大差分值方便观察
+                plt.plot(x_axis[:-1], diffs * 5, color='red', alpha=0.5, label='Diff (Scaled x5)')
+                
+                plt.axhline(y=mutation_threshold, color='green', linestyle='--', label='Threshold')
+                
+                plt.title(f"{filename} | Max Diff: {max_diff:.2f} | Window: {window_size}")
+                plt.legend()
+                
+                # 保存图表
+                debug_img_path = os.path.join(output_folder, filename + "_analysis.png")
+                plt.savefig(debug_img_path)
+                plt.close()
+
+    print("-" * 30)
+    print(f"检测完成。发现 {detect_count} 张异常图。")
+    print(f"结果保存在: {output_folder}")
+
+# ==========================================
+# 参数配置区
+# ==========================================
+target_directory = r"D:\Codes\PI Inkjet\connecttest"
+
+# 1. 截取位置
+ROI_POS = 'bottom'   # 'top' 或 'bottom'
+ROI_RATIO = 0.15     # 15%
+
+# 2. X轴滑动窗口大小 (像素)
+WINDOW_SIZE = 35
+
+# 3. 突变阈值
+# 经过 35 像素的平均，噪点已被磨平。
+# 如果这里出现 > 3.0 或 5.0 的差值，说明这 35 个像素的平均亮度发生了显著位移。
+# 建议范围: 2.0 ~ 8.0
+THRESHOLD = 2.0
+
+# 4. 调试模式 (强烈建议开启，查看蓝色曲线是否符合预期)
+DEBUG = True
+
+if __name__ == '__main__':
+    detect_gray_mutation_sliding_window(target_directory, 
+                                        window_size=WINDOW_SIZE,
+                                        roi_position=ROI_POS, 
+                                        roi_ratio=ROI_RATIO, 
+                                        mutation_threshold=THRESHOLD,
+                                        debug_mode=DEBUG)
